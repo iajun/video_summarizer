@@ -196,7 +196,7 @@ class BrowserAIProvider(BaseAIProvider):
         selector = self._get_wait_success_selector()
         if selector:
             try:
-                await self.page.wait_for_selector(selector, timeout=10)
+                await self.page.wait_for_selector(selector, timeout=60)
             except:
                 pass
         

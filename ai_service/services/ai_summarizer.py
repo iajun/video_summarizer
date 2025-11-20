@@ -6,7 +6,7 @@ AI总结服务模块
 
 from typing import Optional
 from ..utils import S3Client
-from ..utils.task_queue import run_io_blocking, run_io_bound
+from ..utils.task_queue import run_io_blocking, run_io_bound, run_coro_blocking
 import asyncio
 
 
@@ -159,8 +159,8 @@ class AISummarizer:
             custom_prompt: 自定义提示词（可选，用户调试时使用）
             method_config: AI方法配置（可选，包含api_key, cookies等）
         """
-        # 在线程池中运行异步方法
-        return run_io_blocking(
+        # 在线程池中运行异步方法（使用 run_coro_blocking 来正确处理 coroutine）
+        return run_coro_blocking(
             self.summarize_with_ai_async,
             text,
             video_id,
