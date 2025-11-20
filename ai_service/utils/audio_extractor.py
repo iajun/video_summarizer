@@ -40,6 +40,12 @@ class AudioExtractor:
             音频文件本地路径
         """
         try:
+            # 首先检查视频是否包含音频流
+            has_audio = self._has_audio_stream(video_path)
+            if not has_audio:
+                print(f"视频文件不包含音频流: {video_path}")
+                return None
+            
             # 本地临时音频文件
             temp_dir = Path(tempfile.gettempdir()) / "ai_service_downloads"
             temp_dir.mkdir(exist_ok=True)
@@ -69,9 +75,54 @@ class AudioExtractor:
             print(f"音频提取失败: {str(e)}")
             return None
     
+    def _has_audio_stream(self, video_path: str) -> bool:
+        """
+        检查视频文件是否包含音频流
+        
+        Args:
+            video_path: 视频文件路径
+            
+        Returns:
+            如果包含音频流返回 True，否则返回 False
+        """
+        try:
+            # 使用 ffprobe 检查视频流信息
+            cmd = [
+                "ffprobe", "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_type", "-of", "default=noprint_wrappers=1:nokey=1",
+                video_path
+            ]
+            result = run_io_blocking(subprocess.run, cmd, capture_output=True, text=True, timeout=30)
+            # 如果找到音频流，ffprobe 会输出 "audio"
+            return result.returncode == 0 and "audio" in result.stdout.lower()
+        except Exception as e:
+            print(f"检查音频流失败: {str(e)}")
+            # 如果检查失败，假设有音频流，让后续的提取过程来处理
+            return True
+    
+    async def _has_audio_stream_async(self, video_path: str) -> bool:
+        """异步版本：检查视频文件是否包含音频流"""
+        try:
+            cmd = [
+                "ffprobe", "-v", "error", "-select_streams", "a:0",
+                "-show_entries", "stream=codec_type", "-of", "default=noprint_wrappers=1:nokey=1",
+                video_path
+            ]
+            result = await run_io_bound(subprocess.run, cmd, capture_output=True, text=True, timeout=30)
+            return result.returncode == 0 and "audio" in result.stdout.lower()
+        except Exception as e:
+            print(f"检查音频流失败: {str(e)}")
+            return True
+
     async def extract_audio_async(self, video_path: str, video_id: str, force_extract: bool = False) -> Optional[str]:
         """异步版本：在共享 IO 线程池中执行阻塞步骤，避免阻塞事件循环。"""
         try:
+            # 首先检查视频是否包含音频流
+            has_audio = await self._has_audio_stream_async(video_path)
+            if not has_audio:
+                print(f"视频文件不包含音频流: {video_path}")
+                return None
+            
             temp_dir = Path(tempfile.gettempdir()) / "ai_service_downloads"
             temp_dir.mkdir(exist_ok=True)
             audio_path = temp_dir / f"{video_id}_audio.wav"

@@ -322,18 +322,22 @@ class TaskWorker:
             audio_extractor = AudioExtractor()
             audio_path = audio_extractor.extract_audio(video_path, video_id)
             
-            if not audio_path:
-                raise Exception("Failed to extract audio")
-            
-            self._update_task_status(task_id, TaskStatus.EXTRACTING_AUDIO.value, 50,
-                audio_path=f"videos/{video_id}_audio.wav"
-            )
-            
             # 3. 语音转文字
             self._update_task_status(task_id, TaskStatus.TRANSCRIBING.value, 60)
             
-            transcription_service = TranscriptionService()
-            transcription = transcription_service.transcribe(audio_path, video_id)
+            transcription = None
+            if audio_path:
+                # 如果成功提取了音频，进行转录
+                self._update_task_status(task_id, TaskStatus.EXTRACTING_AUDIO.value, 50,
+                    audio_path=f"videos/{video_id}_audio.wav"
+                )
+                
+                transcription_service = TranscriptionService()
+                transcription = transcription_service.transcribe(audio_path, video_id)
+            else:
+                # 视频没有音频流，创建占位符转录文本
+                print(f"视频文件不包含音频流，跳过音频提取和转录步骤")
+                transcription = "[此视频不包含音频内容，无法进行语音转录]"
             
             if not transcription:
                 raise Exception("Failed to transcribe audio")

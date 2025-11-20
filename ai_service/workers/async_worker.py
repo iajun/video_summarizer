@@ -462,25 +462,29 @@ class AsyncTaskProcessor:
                 video_id
             )
             
-            if not audio_path:
-                raise Exception("Failed to extract audio")
-            
-            await self._update_task_status(
-                task_id,
-                TaskStatus.EXTRACTING_AUDIO.value,
-                50,
-                audio_path=f"videos/{video_id}_audio.wav"
-            )
-            
             # 3. 语音转文字（CPU密集型，使用进程池）
             await self._update_task_status(task_id, TaskStatus.TRANSCRIBING.value, 60)
             
-            # 直接使用纯函数，优先使用 faster_whisper，如果不可用则回退到标准 whisper
-            from ..services.transcription_service import _transcribe_auto
-            transcription = await run_cpu_bound(
-                _transcribe_auto,
-                audio_path,
-            )
+            transcription = None
+            if audio_path:
+                # 如果成功提取了音频，进行转录
+                await self._update_task_status(
+                    task_id,
+                    TaskStatus.EXTRACTING_AUDIO.value,
+                    50,
+                    audio_path=f"videos/{video_id}_audio.wav"
+                )
+                
+                # 直接使用纯函数，优先使用 faster_whisper，如果不可用则回退到标准 whisper
+                from ..services.transcription_service import _transcribe_auto
+                transcription = await run_cpu_bound(
+                    _transcribe_auto,
+                    audio_path,
+                )
+            else:
+                # 视频没有音频流，创建占位符转录文本
+                print(f"视频文件不包含音频流，跳过音频提取和转录步骤")
+                transcription = "[此视频不包含音频内容，无法进行语音转录]"
             
             if not transcription:
                 raise Exception("Failed to transcribe audio")

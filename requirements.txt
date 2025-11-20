@@ -34,6 +34,7 @@ dotenv==0.9.9
 python-dotenv==1.2.1
 minio==7.2.18
 openai==2.8.1
-whisper==1.1.10
 SQLAlchemy==2.0.44
-psycopg2-binary==2.9.10you-get==0.4.1743
+psycopg2-binary==2.9.10
+you-get==0.4.1743
+openai-whisper==20250625
