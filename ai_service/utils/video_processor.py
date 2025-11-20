@@ -85,17 +85,6 @@ class VideoProcessor:
                     )
                     return local_path, normalized_info, video_id
                 
-                # 检查S3缓存
-                s3_path = await self._check_s3_cache(video_id)
-                if s3_path:
-                    print(f"找到S3缓存: {s3_path}")
-                    local_path = await self._download_from_s3_to_local(s3_path, video_id, output_dir)
-                    if local_path:
-                        normalized_info = platform_downloader.normalize_video_info(
-                            video_info, url, video_id
-                        )
-                        return local_path, normalized_info, video_id
-            
             # 执行下载
             print("开始下载视频...")
             result = await platform_downloader.download_video(
@@ -150,21 +139,24 @@ class VideoProcessor:
         
         Args:
             video_id: 视频ID
-            downloader: 下载器实例
-            url: 视频URL
             
         Returns:
             本地视频文件路径，如果不存在则返回 None
         """
         try:
             # 确定下载目录
-            if self.downloader and hasattr(self.downloader, 'parameter'):
+            download_dir = None
+            if (self.downloader and 
+                hasattr(self.downloader, 'parameter') and 
+                self.downloader.parameter and 
+                hasattr(self.downloader.parameter, 'root') and 
+                self.downloader.parameter.root):
                 download_dir = Path(self.downloader.parameter.root) / "Download"
             else:
                 from tiktok_downloader.src.custom import PROJECT_ROOT
                 download_dir = PROJECT_ROOT / "Download"
             
-            if not download_dir.exists():
+            if not download_dir or not download_dir.exists():
                 return None
             
             # 支持的视频文件扩展名
@@ -186,43 +178,3 @@ class VideoProcessor:
             print(f"检查本地缓存失败: {e}")
             return None
     
-    async def _check_s3_cache(self, video_id: str) -> Optional[str]:
-        """
-        检查S3缓存
-        
-        Args:
-            video_id: 视频ID
-            
-        Returns:
-            S3路径，如果不存在则返回 None
-        """
-        try:
-            s3_video_path = f"videos/{video_id}.mp4"
-            s3_exists = await run_io_bound(self.s3_client.file_exists, s3_video_path)
-            if s3_exists:
-                return s3_video_path
-            return None
-        except Exception as e:
-            print(f"检查S3缓存失败: {e}")
-            return None
-    
-    async def _download_from_s3_to_local(self, s3_path: str, video_id: str, output_dir: str) -> Optional[str]:
-        """
-        从S3下载文件到本地
-        
-        Args:
-            s3_path: S3路径
-            video_id: 视频ID
-            
-        Returns:
-            local_path: 本地文件路径
-        """
-        try:
-            local_path = Path(output_dir) / f"{video_id}.mp4"
-            success = await run_io_bound(self.s3_client.download_file, s3_path, str(local_path))
-            if success:
-                return str(local_path)
-            return None
-        except Exception as e:
-            print(f"从S3下载文件失败: {e}")
-            return None

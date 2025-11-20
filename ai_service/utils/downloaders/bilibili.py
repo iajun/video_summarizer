@@ -297,17 +297,37 @@ class BilibiliDownloader(BaseDownloader):
             )
             
             print(f"开始下载视频: {url}")
-            result = subprocess.run(
+            print(f"执行命令: {' '.join(cmd)}")
+            
+            # 使用 Popen 实时输出进度
+            process = subprocess.Popen(
                 cmd,
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
                 text=True,
-                timeout=600,
                 encoding='utf-8',
-                errors='ignore'
+                errors='ignore',
+                bufsize=1,  # 行缓冲
+                universal_newlines=True
             )
             
-            if result.returncode != 0:
-                print(f"下载失败: {result.stderr}")
+            # 实时输出进度
+            try:
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        # 实时打印输出，不换行避免重复换行
+                        print(line.rstrip(), flush=True)
+                
+                process.wait(timeout=600)
+                returncode = process.returncode
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+                print("下载视频超时")
+                return None, None
+            
+            if returncode != 0:
+                print(f"下载失败，返回码: {returncode}")
                 return None, None
             
             video_path = self._find_downloaded_video(output_path, safe_title)

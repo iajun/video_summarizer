@@ -161,7 +161,7 @@ class AISummarizer:
         """
         # 在线程池中运行异步方法
         return run_io_blocking(
-            self._summarize_with_ai_async,
+            self.summarize_with_ai_async,
             text,
             video_id,
             force_regenerate,

@@ -59,7 +59,7 @@ class AsyncTaskProcessor:
         return self._deepseek_api_key
     
     async def _reset_stuck_tasks(self):
-        """重置处于中间状态的卡住任务"""
+        """清理处于中间状态的卡住任务的错误信息（不重置状态）"""
         try:
             with get_db_session() as db:
                 stuck_tasks = db.query(Task).filter(
@@ -72,21 +72,19 @@ class AsyncTaskProcessor:
                 ).all()
                 
                 if stuck_tasks:
-                    print(f"Found {len(stuck_tasks)} stuck tasks, resetting...")
+                    print(f"Found {len(stuck_tasks)} stuck tasks, clearing error messages...")
                     for stuck_task in stuck_tasks:
-                        stuck_task.status = TaskStatus.PENDING.value
-                        stuck_task.progress = 0
                         stuck_task.updated_at = datetime.utcnow()
                         if hasattr(stuck_task, 'error_message'):
                             stuck_task.error_message = None
                     
                     db.commit()
-                    print(f"Reset {len(stuck_tasks)} stuck tasks")
+                    print(f"Cleared error messages for {len(stuck_tasks)} stuck tasks")
         except Exception as e:
-            print(f"Error resetting stuck tasks: {e}")
+            print(f"Error clearing stuck tasks: {e}")
     
     async def _reset_old_stuck_tasks(self, max_age_hours: int = 24):
-        """重置超过指定时间的卡住任务"""
+        """清理超过指定时间的卡住任务的错误信息（不重置状态）"""
         try:
             old_threshold = datetime.utcnow() - timedelta(hours=max_age_hours)
             
@@ -102,18 +100,16 @@ class AsyncTaskProcessor:
                 ).all()
                 
                 if old_stuck_tasks:
-                    print(f"Resetting {len(old_stuck_tasks)} old stuck tasks...")
+                    print(f"Clearing error messages for {len(old_stuck_tasks)} old stuck tasks...")
                     for stuck_task in old_stuck_tasks:
-                        stuck_task.status = TaskStatus.PENDING.value
-                        stuck_task.progress = 0
                         stuck_task.updated_at = datetime.utcnow()
                         if hasattr(stuck_task, 'error_message'):
                             stuck_task.error_message = None
                     
                     db.commit()
-                    print(f"Reset {len(old_stuck_tasks)} old stuck tasks")
+                    print(f"Cleared error messages for {len(old_stuck_tasks)} old stuck tasks")
         except Exception as e:
-            print(f"Error resetting old stuck tasks: {e}")
+            print(f"Error clearing old stuck tasks: {e}")
     
     async def _update_task_status(
         self, 
@@ -266,61 +262,152 @@ class AsyncTaskProcessor:
             traceback.print_exc()
     
     async def process_task_async(self, task_id: int) -> bool:
-        """异步处理单个任务"""
+        """异步处理单个任务，支持从失败步骤继续"""
         try:
-            # 获取任务信息
+            # 获取任务完整信息
             def _get_task():
                 with get_db_session() as db:
                     task = db.query(Task).filter(Task.id == task_id).first()
                     if task:
-                        return task.url, {
+                        return {
                             'id': task.id,
                             'url': task.url,
-                            'status': task.status
+                            'status': task.status,
+                            'video_id': task.video_id,
+                            'video_path': task.video_path,
+                            'audio_path': task.audio_path,
+                            'transcription': task.transcription,
+                            'summary': task.summary,
+                            'platform': task.platform,
+                            'video_db_id': task.video_db_id,
+                            'progress': task.progress,
                         }
-                    return None, None
+                    return None
             
-            task_url, task_info = await run_io_bound(_get_task)
+            task_data = await run_io_bound(_get_task)
             
-            if not task_url:
+            if not task_data:
                 print(f"Task {task_id} not found")
                 return False
             
-            # 更新状态为下载中
-            await self._update_task_status(task_id, TaskStatus.DOWNLOADING.value, 10)
+            task_url = task_data['url']
+            current_status = task_data['status']
             
-            print(f"Starting to process task {task_id} for URL: {task_url}")
+            # 根据当前状态决定从哪个步骤开始
+            # 如果任务失败，从失败步骤重新开始
+            if current_status == TaskStatus.FAILED.value:
+                # 根据已有数据判断从哪个步骤继续
+                if not task_data.get('video_id'):
+                    current_status = TaskStatus.PENDING.value
+                elif not task_data.get('audio_path') and not task_data.get('transcription'):
+                    current_status = TaskStatus.EXTRACTING_AUDIO.value
+                elif not task_data.get('transcription'):
+                    current_status = TaskStatus.TRANSCRIBING.value
+                elif not task_data.get('summary'):
+                    current_status = TaskStatus.SUMMARIZING.value
+                else:
+                    current_status = TaskStatus.SUMMARIZING.value
             
-            # 1. 下载视频（异步）
-            await self._update_task_status(task_id, TaskStatus.DOWNLOADING.value, 20)
+            print(f"Resuming task {task_id} from status: {current_status} for URL: {task_url}")
             
-            # 获取 Bilibili cookies 设置
-            bilibili_cookies = None
-            try:
-                with get_db_session() as db:
-                    setting = db.query(Setting).filter(Setting.key == "bilibili_cookies").first()
-                    if setting and setting.value:
-                        bilibili_cookies = setting.value
-            except Exception as e:
-                print(f"获取 Bilibili cookies 设置失败: {e}")
+            # 初始化变量
+            video_path = None
+            detail_dict = {}
+            video_id = task_data.get('video_id')
             
-            downloader = TikTokDownloader()
-            async with downloader:
-                video_processor = VideoProcessor(downloader, bilibili_cookies=bilibili_cookies)
-                result = await video_processor.download_video(
-                    url=task_url,
-                    force_download=False
-                )
-            
-            if not result:
-                raise Exception("Failed to download video")
-            
-            video_path, detail_dict, video_id = result
-            
-            if not video_path or not detail_dict or not video_id:
-                raise Exception("Failed to download video")
-            
-            print(f"Video downloaded: {video_path}, Video ID: {video_id}")
+            # 步骤1: 下载视频（如果还没完成）
+            if current_status in [TaskStatus.PENDING.value, TaskStatus.DOWNLOADING.value]:
+                await self._update_task_status(task_id, TaskStatus.DOWNLOADING.value, 10)
+                
+                # 获取 Bilibili cookies 设置
+                bilibili_cookies = None
+                try:
+                    with get_db_session() as db:
+                        setting = db.query(Setting).filter(Setting.key == "bilibili_cookies").first()
+                        if setting and setting.value:
+                            bilibili_cookies = setting.value
+                except Exception as e:
+                    print(f"获取 Bilibili cookies 设置失败: {e}")
+                
+                downloader = TikTokDownloader()
+                async with downloader:
+                    video_processor = VideoProcessor(downloader, bilibili_cookies=bilibili_cookies)
+                    result = await video_processor.download_video(
+                        url=task_url,
+                        force_download=False
+                    )
+                
+                if not result:
+                    raise Exception("Failed to download video")
+                
+                video_path, detail_dict, video_id = result
+                
+                if not video_path or not detail_dict or not video_id:
+                    raise Exception("Failed to download video")
+                
+                print(f"Video downloaded: {video_path}, Video ID: {video_id}")
+            else:
+                # 如果视频已下载，需要获取本地文件路径
+                video_id = task_data.get('video_id')
+                if not video_id:
+                    raise Exception("Task has no video_id, cannot resume")
+                
+                # 获取 Bilibili cookies 设置（如果需要）
+                bilibili_cookies = None
+                try:
+                    with get_db_session() as db:
+                        setting = db.query(Setting).filter(Setting.key == "bilibili_cookies").first()
+                        if setting and setting.value:
+                            bilibili_cookies = setting.value
+                except Exception as e:
+                    print(f"获取 Bilibili cookies 设置失败: {e}")
+                
+                # 尝试从本地缓存获取
+                downloader = TikTokDownloader()
+                async with downloader:
+                    video_processor = VideoProcessor(downloader, bilibili_cookies=bilibili_cookies)
+                    local_path = await video_processor._check_local_cache(video_id)
+                    if local_path:
+                        video_path = local_path
+                        print(f"Found local cached video: {video_path}")
+                    else:
+                        # 从 S3 下载到本地临时目录
+                        s3_video_path = task_data.get('video_path')
+                        if s3_video_path:
+                            import tempfile
+                            temp_dir = tempfile.gettempdir()
+                            local_video_path = os.path.join(temp_dir, f"{video_id}.mp4")
+                            
+                            def _download_from_s3():
+                                s3_client = S3Client()
+                                if s3_client.file_exists(s3_video_path):
+                                    return s3_client.download_file(s3_video_path, local_video_path)
+                                return False
+                            
+                            downloaded = await run_io_bound(_download_from_s3)
+                            if downloaded and os.path.exists(local_video_path):
+                                video_path = local_video_path
+                                print(f"Downloaded video from S3: {video_path}")
+                            else:
+                                raise Exception(f"Cannot find video file locally or in S3: {s3_video_path}")
+                        else:
+                            raise Exception("Task has no video_path, cannot resume")
+                    
+                    # 获取视频详情（从数据库或重新提取）
+                    if task_data.get('platform'):
+                        detail_dict = {
+                            'platform': task_data.get('platform', 'douyin'),
+                        }
+                    else:
+                        # 需要重新提取视频信息（在同一个 downloader 上下文中）
+                        video_info = await video_processor.download_video(
+                            url=task_url,
+                            force_download=False
+                        )
+                        if video_info and video_info[1]:
+                            detail_dict = video_info[1]
+                        else:
+                            detail_dict = {'platform': 'douyin'}
             
             # 检查是否已存在完成的任务
             def _check_existing():
@@ -452,94 +539,115 @@ class AsyncTaskProcessor:
             
             await run_io_bound(_create_video_record)
             
-            # 2. 提取音频
-            await self._update_task_status(task_id, TaskStatus.EXTRACTING_AUDIO.value, 40)
+            # 步骤2: 提取音频（如果还没完成）
+            transcription = task_data.get('transcription')
+            audio_path = None
             
-            audio_extractor = AudioExtractor()
-            # 使用异步版本的音频提取方法
-            audio_path = await audio_extractor.extract_audio_async(
-                video_path,
-                video_id
-            )
-            
-            # 3. 语音转文字（CPU密集型，使用进程池）
-            await self._update_task_status(task_id, TaskStatus.TRANSCRIBING.value, 60)
-            
-            transcription = None
-            if audio_path:
-                # 如果成功提取了音频，进行转录
-                await self._update_task_status(
-                    task_id,
-                    TaskStatus.EXTRACTING_AUDIO.value,
-                    50,
-                    audio_path=f"videos/{video_id}_audio.wav"
+            if current_status in [TaskStatus.PENDING.value, TaskStatus.DOWNLOADING.value, 
+                                  TaskStatus.EXTRACTING_AUDIO.value] or not transcription:
+                await self._update_task_status(task_id, TaskStatus.EXTRACTING_AUDIO.value, 40)
+                
+                audio_extractor = AudioExtractor()
+                # 使用异步版本的音频提取方法
+                audio_path = await audio_extractor.extract_audio_async(
+                    video_path,
+                    video_id
                 )
                 
-                # 直接使用纯函数，优先使用 faster_whisper，如果不可用则回退到标准 whisper
-                from ..services.transcription_service import _transcribe_auto
-                transcription = await run_cpu_bound(
-                    _transcribe_auto,
-                    audio_path,
-                )
+                # 步骤3: 语音转文字（如果还没完成）
+                if not transcription:
+                    await self._update_task_status(task_id, TaskStatus.TRANSCRIBING.value, 60)
+                    
+                    if audio_path:
+                        # 如果成功提取了音频，进行转录
+                        await self._update_task_status(
+                            task_id,
+                            TaskStatus.EXTRACTING_AUDIO.value,
+                            50,
+                            audio_path=f"videos/{video_id}_audio.wav"
+                        )
+                        
+                        # 直接使用纯函数，优先使用 faster_whisper，如果不可用则回退到标准 whisper
+                        from ..services.transcription_service import _transcribe_auto
+                        transcription = await run_cpu_bound(
+                            _transcribe_auto,
+                            audio_path,
+                        )
+                    else:
+                        # 视频没有音频流，创建占位符转录文本
+                        print(f"视频文件不包含音频流，跳过音频提取和转录步骤")
+                        transcription = "[此视频不包含音频内容，无法进行语音转录]"
+                    
+                    if not transcription:
+                        raise Exception("Failed to transcribe audio")
+                    
+                    await self._update_task_status(
+                        task_id,
+                        TaskStatus.TRANSCRIBING.value,
+                        70,
+                        transcription=transcription,
+                        transcription_path=f"videos/{video_id}_transcription.txt"
+                    )
             else:
-                # 视频没有音频流，创建占位符转录文本
-                print(f"视频文件不包含音频流，跳过音频提取和转录步骤")
-                transcription = "[此视频不包含音频内容，无法进行语音转录]"
+                print(f"Task {task_id} already has transcription, skipping audio extraction and transcription")
             
-            if not transcription:
-                raise Exception("Failed to transcribe audio")
+            # 步骤4: AI总结（如果还没完成）
+            summary = task_data.get('summary')
             
-            await self._update_task_status(
-                task_id,
-                TaskStatus.TRANSCRIBING.value,
-                70,
-                transcription=transcription,
-                transcription_path=f"videos/{video_id}_transcription.txt"
-            )
-            
-            # 4. AI总结（在线程池中执行）
-            await self._update_task_status(task_id, TaskStatus.SUMMARIZING.value, 80)
-            
-            ai_summarizer = AISummarizer(self._deepseek_api_key)
-            summary = await run_io_bound(
-                ai_summarizer.summarize_with_ai,
-                transcription,
-                video_id
-            )
-            
-            if summary:
-                await self._update_task_status(
-                    task_id,
-                    TaskStatus.SUMMARIZING.value,
-                    90,
-                    summary=summary,
-                    summary_path=f"videos/{video_id}_summary.txt"
+            if current_status in [TaskStatus.PENDING.value, TaskStatus.DOWNLOADING.value,
+                                  TaskStatus.EXTRACTING_AUDIO.value, TaskStatus.TRANSCRIBING.value,
+                                  TaskStatus.SUMMARIZING.value] or not summary:
+                await self._update_task_status(task_id, TaskStatus.SUMMARIZING.value, 80)
+                
+                if not transcription:
+                    raise Exception("Cannot summarize without transcription")
+                
+                ai_summarizer = AISummarizer(self._deepseek_api_key)
+                # 直接使用异步方法，不需要 run_io_bound
+                summary = await ai_summarizer.summarize_with_ai_async(
+                    transcription,
+                    video_id
                 )
                 
-                # 创建 VideoSummary 记录
-                def _create_summary():
-                    with get_db_session() as db:
-                        task = db.query(Task).filter(Task.id == task_id).first()
-                        if task:
-                            summary_count = db.query(VideoSummary).filter(
-                                VideoSummary.task_id == task_id
-                            ).count()
+                if summary:
+                    await self._update_task_status(
+                        task_id,
+                        TaskStatus.SUMMARIZING.value,
+                        90,
+                        summary=summary,
+                        summary_path=f"videos/{video_id}_summary.txt"
+                    )
+                    
+                    # 创建 VideoSummary 记录（如果还没有）
+                    def _check_and_create_summary():
+                        with get_db_session() as db:
+                            existing_summary = db.query(VideoSummary).filter(
+                                VideoSummary.task_id == task_id,
+                                VideoSummary.content == summary
+                            ).first()
                             
-                            prompt_info = ai_summarizer._get_default_prompt_info()
-                            summary_name = prompt_info['name'] if prompt_info else "默认总结"
-                            
-                            video_summary = VideoSummary(
-                                task_id=task_id,
-                                name=summary_name,
-                                content=summary,
-                                custom_prompt=None,
-                                sort_order=summary_count
-                            )
-                            db.add(video_summary)
-                            db.commit()
-                            print(f"Created VideoSummary record for task {task_id}")
-                
-                await run_io_bound(_create_summary)
+                            if not existing_summary:
+                                summary_count = db.query(VideoSummary).filter(
+                                    VideoSummary.task_id == task_id
+                                ).count()
+                                
+                                prompt_info = ai_summarizer._get_default_prompt_info()
+                                summary_name = prompt_info['name'] if prompt_info else "默认总结"
+                                
+                                video_summary = VideoSummary(
+                                    task_id=task_id,
+                                    name=summary_name,
+                                    content=summary,
+                                    custom_prompt=None,
+                                    sort_order=summary_count
+                                )
+                                db.add(video_summary)
+                                db.commit()
+                                print(f"Created VideoSummary record for task {task_id}")
+                    
+                    await run_io_bound(_check_and_create_summary)
+            else:
+                print(f"Task {task_id} already has summary, skipping summarization")
             
             # 发送邮件通知
             await self._send_email_notifications(task_id, video_id, summary, detail_dict)
@@ -609,14 +717,27 @@ class AsyncTaskProcessor:
                         except Exception as e:
                             print(f"Error in task {task_id}: {e}")
                 
-                # 获取待处理的任务
+                # 获取待处理的任务（包括 PENDING、中间状态和 FAILED 状态）
                 def _get_pending_tasks():
                     with get_db_session() as db:
                         active_task_ids = set(self.active_tasks.keys())
+                        # 查询所有需要处理的任务：PENDING、中间状态和 FAILED
                         pending_tasks = db.query(Task).filter(
-                            Task.status == TaskStatus.PENDING.value,
+                            Task.status.in_([
+                                TaskStatus.PENDING.value,
+                                TaskStatus.DOWNLOADING.value,
+                                TaskStatus.EXTRACTING_AUDIO.value,
+                                TaskStatus.TRANSCRIBING.value,
+                                TaskStatus.SUMMARIZING.value,
+                                TaskStatus.FAILED.value
+                            ]),
                             ~Task.id.in_(active_task_ids) if active_task_ids else True
-                        ).order_by(Task.created_at.asc()).limit(
+                        ).order_by(
+                            # 优先处理 FAILED 和 PENDING，然后按创建时间排序
+                            Task.status == TaskStatus.FAILED.value,
+                            Task.status == TaskStatus.PENDING.value,
+                            Task.created_at.asc()
+                        ).limit(
                             self.max_concurrent_tasks - len(self.active_tasks)
                         ).all()
                         return [task.id for task in pending_tasks]
