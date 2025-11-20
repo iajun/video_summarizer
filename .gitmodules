@@ -1,0 +1,3 @@
+[submodule "tiktok_downloader"]
+	path = tiktok_downloader
+	url = https://github.com/JoeanAmier/TikTokDownloader.git
