@@ -1,6 +1,16 @@
 """
 AI Service Module - FastAPI服务化
 提供视频AI总结的HTTP API接口
+
+模块结构:
+- api/: FastAPI路由和应用
+- core/: 核心业务逻辑和工作流
+- services/: 业务服务层
+- routes/: API路由定义
+- models/: 数据模型
+- db/: 数据库相关
+- utils/: 工具类
+- workers/: 后台任务处理
 """
 
 import sys

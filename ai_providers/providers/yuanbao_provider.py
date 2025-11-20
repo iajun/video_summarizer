@@ -1,25 +1,38 @@
-"""腾讯元宝 Service - 使用 Playwright 访问 yuanbao.tencent.com"""
+"""
+腾讯元宝 浏览器提供者
+使用Playwright访问腾讯元宝进行文本总结
+"""
 
 from typing import Optional
-from .base_service import BaseAIService
+from .browser_provider import BrowserAIProvider
 
 
-class YuanBaoService(BaseAIService):
-    """腾讯元宝服务"""
+class YuanBaoProvider(BrowserAIProvider):
+    """腾讯元宝浏览器提供者"""
     
-    def __init__(self, cookies: Optional[str] = None):
-        super().__init__(cookies, "https://yuanbao.tencent.com")
-    
-    def _get_service_name(self) -> str:
-        return "腾讯元宝"
+    def __init__(self, cookies: Optional[str] = None, config: Optional[dict] = None):
+        """
+        初始化腾讯元宝提供者
+        
+        Args:
+            cookies: 腾讯元宝Cookies（JSON格式或分号分隔）
+            config: 额外配置
+        """
+        super().__init__(
+            name="腾讯元宝",
+            chat_url="https://yuanbao.tencent.com",
+            cookies=cookies,
+            config=config
+        )
     
     def _get_headless_mode(self) -> bool:
         return True
     
     def _get_input_selectors(self) -> list[str]:
         return ['.chat-input-editor > .ql-editor']
-
+    
     async def _init_page(self):
+        """初始化页面：点击深度思考按钮"""
         if button := await self.page.query_selector('div[dt-button-id="deep_think"]'):
             await button.click()
     
@@ -36,6 +49,8 @@ class YuanBaoService(BaseAIService):
         ]
     
     async def _check_login_status(self):
+        """检查登录状态"""
         page_content = await self.page.content()
         if "login" in self.page.url.lower() or "未登录" in page_content:
             print("检测到需要登录，请确保cookies有效")
+

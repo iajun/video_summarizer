@@ -1,23 +1,46 @@
-"""AI服务基类 - 提供通用浏览器操作方法"""
+"""
+浏览器方式AI提供者基类
+用于通过Playwright无头浏览器访问AI服务（如ChatGPT、腾讯元宝）
+"""
 
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from typing import Optional
 from playwright.async_api import async_playwright, Page, Browser
 from urllib.parse import urlparse
 import asyncio
 import json
 
+from ..base import BaseAIProvider
 
-class BaseAIService(ABC):
-    """AI服务基类（异步版本）"""
+
+class BrowserAIProvider(BaseAIProvider):
+    """浏览器方式AI提供者基类"""
     
-    def __init__(self, cookies: Optional[str] = None, chat_url: Optional[str] = None):
+    def __init__(self, name: str, chat_url: str, cookies: Optional[str] = None, config: Optional[dict] = None):
+        """
+        初始化浏览器提供者
+        
+        Args:
+            name: 提供者名称
+            chat_url: AI服务的聊天页面URL
+            cookies: Cookies字符串（JSON格式或分号分隔）
+            config: 额外配置
+        """
+        super().__init__(name, config)
+        self.chat_url = chat_url
+        self.cookies = cookies or (config.get('cookies') if config else None)
         self.browser: Optional[Browser] = None
         self.page: Optional[Page] = None
-        self.cookies_dict = self._parse_cookies(cookies) if cookies else None
         self.playwright = None
-        self.chat_url = chat_url
-        
+        self.cookies_dict = self._parse_cookies(self.cookies) if self.cookies else None
+    
+    def get_provider_type(self) -> str:
+        return 'browser'
+    
+    def is_configured(self) -> bool:
+        """检查Cookies是否已配置"""
+        return bool(self.cookies)
+    
     def _parse_cookies(self, cookies_str: str) -> list:
         """解析cookies字符串为字典列表"""
         if not cookies_str:
@@ -31,7 +54,7 @@ class BaseAIService(ABC):
                    if '=' in item and (k := item.split('=', 1)[0].strip()) and (v := item.split('=', 1)[1].strip())]
     
     async def _initialize_browser(self, headless: bool = True):
-        """初始化浏览器（异步严格执行每个异常检查）"""
+        """初始化浏览器"""
         if self.browser and self.page:
             return
         try:
@@ -51,7 +74,7 @@ class BaseAIService(ABC):
                     if 'domain' not in cookie and 'url' not in cookie:
                         cookie['domain'] = parsed.netloc if parsed else ''
                     cookie.setdefault('path', '/')
-                    # Normalize sameSite to Playwright accepted values (Strict, Lax, None)
+                    # Normalize sameSite
                     same_site_key = None
                     for key in cookie.keys():
                         if key.lower() == 'samesite':
@@ -67,9 +90,7 @@ class BaseAIService(ABC):
                         elif same_site_lower == 'lax':
                             cookie['sameSite'] = 'Lax'
                         else:
-                            # Remove invalid sameSite values
                             cookie.pop(same_site_key, None)
-                        # Remove the old key if it was different from 'sameSite'
                         if same_site_key != 'sameSite' and same_site_key in cookie:
                             cookie.pop(same_site_key, None)
                 await context.add_cookies(self.cookies_dict)
@@ -93,37 +114,6 @@ class BaseAIService(ABC):
                     pass
         self.page = self.browser = self.playwright = None
     
-    async def summarize(self, final_prompt: str) -> Optional[str]:
-        """总结文本（异步模板方法）"""
-        try:
-            await self._initialize_browser(headless=self._get_headless_mode())
-            print(f"正在访问{self._get_service_name()}...")
-            await self.page.goto(self.chat_url, wait_until='networkidle')
-            await asyncio.sleep(3)
-            await self._check_login_status()
-
-            await self._init_page()
-            
-            if not (input_element := await self._find_input_element()):
-                return None
-            
-            await input_element.fill(final_prompt)
-            await asyncio.sleep(1)
-            
-            if not await self._submit_message(input_element):
-                return None
-            
-            await asyncio.sleep(2)
-            return await self._wait_and_get_content()
-        except Exception as e:
-            print(f"{self._get_service_name()}总结失败: {e}")
-            return None
-    
-    @abstractmethod
-    def _get_service_name(self) -> str:
-        """获取服务名称"""
-        pass
-    
     @abstractmethod
     def _get_headless_mode(self) -> bool:
         """获取是否使用无头模式"""
@@ -145,7 +135,7 @@ class BaseAIService(ABC):
         pass
     
     async def _init_page(self):
-        """初始化页面"""
+        """初始化页面（子类可重写）"""
         pass
     
     def _get_content_selectors(self) -> Optional[list[str]]:
@@ -250,6 +240,43 @@ class BaseAIService(ABC):
             print(f"从剪贴板获取内容失败: {e}")
             return None
     
+    async def summarize(self, text: str, prompt_template: Optional[str] = None) -> Optional[str]:
+        """总结文本（模板方法）"""
+        try:
+            # 构建最终提示词
+            if prompt_template:
+                if '{text}' in prompt_template:
+                    final_prompt = prompt_template.format(text=text)
+                else:
+                    final_prompt = f"{prompt_template}\n\n{text}"
+            else:
+                final_prompt = f"请总结以下内容：\n\n{text}"
+            
+            await self._initialize_browser(headless=self._get_headless_mode())
+            print(f"正在访问{self.name}...")
+            await self.page.goto(self.chat_url, wait_until='networkidle')
+            await asyncio.sleep(3)
+            await self._check_login_status()
+
+            await self._init_page()
+            
+            if not (input_element := await self._find_input_element()):
+                return None
+            
+            await input_element.fill(final_prompt)
+            await asyncio.sleep(1)
+            
+            if not await self._submit_message(input_element):
+                return None
+            
+            await asyncio.sleep(2)
+            return await self._wait_and_get_content()
+        except Exception as e:
+            print(f"{self.name}总结失败: {e}")
+            return None
+        finally:
+            await self._cleanup_browser()
+    
     async def __aenter__(self):
         """异步上下文管理器入口"""
         return self
@@ -257,3 +284,4 @@ class BaseAIService(ABC):
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         """异步上下文管理器出口"""
         await self._cleanup_browser()
+
